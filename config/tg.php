@@ -1,12 +1,14 @@
 <?php
 
-$ownerLock = getenv('OWNER_LOCK');
+require_once __DIR__ . '/env.php';
+
+$ownerLock = env_value('OWNER_LOCK');
 
 return [
-    'token' => getenv('TG_BOT_TOKEN') ?: 'change-me',
-    'api_base' => getenv('TG_API_BASE') ?: 'https://api.telegram.org',
-    'owner_lock' => $ownerLock === false ? true : filter_var($ownerLock, FILTER_VALIDATE_BOOLEAN),
-    'acme_path' => getenv('ACME_PATH') ?: '/root/.acme.sh/acme.sh',
-    'acme_server' => getenv('ACME_SERVER') ?: 'letsencrypt',
-    'cert_export_path' => getenv('CERT_EXPORT_PATH') ?: '/www/wwwroot/cert.com/ssl/',
+    'token' => env_value('TG_BOT_TOKEN', ''),
+    'api_base' => env_value('TG_API_BASE', 'https://api.telegram.org'),
+    'owner_lock' => $ownerLock === null ? true : filter_var($ownerLock, FILTER_VALIDATE_BOOLEAN),
+    'acme_path' => env_value('ACME_PATH', '/root/.acme.sh/acme.sh'),
+    'acme_server' => env_value('ACME_SERVER', 'letsencrypt'),
+    'cert_export_path' => env_value('CERT_EXPORT_PATH', '/www/wwwroot/cert.com/ssl/'),
 ];

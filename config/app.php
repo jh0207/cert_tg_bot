@@ -1,8 +1,10 @@
 <?php
 
+require_once __DIR__ . '/env.php';
+
 return [
     // 应用调试模式
-    'app_debug' => (bool) getenv('APP_DEBUG'),
+    'app_debug' => filter_var(env_value('APP_DEBUG', false), FILTER_VALIDATE_BOOLEAN),
     // 默认应用
     'default_app' => 'index',
     // 应用命名空间
