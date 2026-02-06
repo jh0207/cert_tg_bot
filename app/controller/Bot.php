@@ -76,16 +76,19 @@ class Bot
         }
 
         if (strpos($text, '/help') === 0) {
-            $help = implode("\n", [
-                '✅ 推荐使用 <b>按钮菜单</b> 进行操作。',
-                '',
-                '备用指令：',
-                '/new 申请证书（进入选择类型流程）',
-                '/domain example.com 快速申请根域名证书',
-                '/verify example.com DNS 解析完成后验证并签发',
-                '/status example.com 查看订单状态',
-            ]);
-            $this->telegram->sendMessage($chatId, $help, $this->buildMainMenuKeyboard());
+            if ($this->auth->isAdmin($message['from']['id'])) {
+                $help = implode("\n", [
+                    '🛠️ <b>管理员指令大全</b>',
+                    '',
+                    '/new 申请证书（进入选择类型流程）',
+                    '/domain example.com 快速申请根域名证书',
+                    '/verify example.com DNS 解析完成后验证并签发',
+                    '/status example.com 查看订单状态',
+                ]);
+                $this->telegram->sendMessage($chatId, $help, $this->buildMainMenuKeyboard());
+            } else {
+                $this->telegram->sendMessage($chatId, '✅ 请使用下方按钮菜单进行操作。', $this->buildMainMenuKeyboard());
+            }
             return;
         }
 
@@ -172,7 +175,12 @@ class Bot
 
         if ($action === 'type') {
             $type = $parts[1] ?? 'root';
-            $result = $this->certService->setOrderType($from['id'], $orderId, $type);
+            $userId = $this->getUserIdByTgId($from);
+            if (!$userId) {
+                $this->telegram->answerCallbackQuery($callbackId, '用户不存在，请先发送 /start');
+                return;
+            }
+            $result = $this->certService->setOrderType($userId, $orderId, $type);
             $this->telegram->answerCallbackQuery($callbackId, $result['message'] ?? '');
             if ($result['success']) {
                 $prompt = "📝 请输入主域名，例如 <b>example.com</b>。\n";
@@ -186,7 +194,12 @@ class Bot
         }
 
         if ($action === 'verify') {
-            $result = $this->certService->verifyOrderById($from['id'], $orderId);
+            $userId = $this->getUserIdByTgId($from);
+            if (!$userId) {
+                $this->telegram->answerCallbackQuery($callbackId, '用户不存在，请先发送 /start');
+                return;
+            }
+            $result = $this->certService->verifyOrderById($userId, $orderId);
             $this->telegram->answerCallbackQuery($callbackId, $result['message'] ?? '');
             if (($result['success'] ?? false) && isset($result['order'])) {
                 $keyboard = $this->buildIssuedKeyboard($result['order']['id']);
@@ -204,14 +217,24 @@ class Bot
         }
 
         if ($action === 'download') {
-            $result = $this->certService->getDownloadInfo($from['id'], $orderId);
+            $userId = $this->getUserIdByTgId($from);
+            if (!$userId) {
+                $this->telegram->answerCallbackQuery($callbackId, '用户不存在，请先发送 /start');
+                return;
+            }
+            $result = $this->certService->getDownloadInfo($userId, $orderId);
             $this->telegram->answerCallbackQuery($callbackId, $result['message'] ?? '');
             $this->telegram->sendMessage($chatId, $result['message']);
             return;
         }
 
         if ($action === 'info') {
-            $result = $this->certService->getCertificateInfo($from['id'], $orderId);
+            $userId = $this->getUserIdByTgId($from);
+            if (!$userId) {
+                $this->telegram->answerCallbackQuery($callbackId, '用户不存在，请先发送 /start');
+                return;
+            }
+            $result = $this->certService->getCertificateInfo($userId, $orderId);
             $this->telegram->answerCallbackQuery($callbackId, $result['message'] ?? '');
             $this->telegram->sendMessage($chatId, $result['message']);
             return;
@@ -244,17 +267,21 @@ class Bot
             }
 
             if ($menuAction === 'help') {
-                $help = implode("\n", [
-                    '✅ 推荐使用 <b>按钮菜单</b> 进行操作。',
-                    '',
-                    '备用指令：',
-                    '/new 申请证书（进入选择类型流程）',
-                    '/domain example.com 快速申请根域名证书',
-                    '/verify example.com DNS 解析完成后验证并签发',
-                    '/status example.com 查看订单状态',
-                ]);
-                $this->telegram->answerCallbackQuery($callbackId, '帮助已发送');
-                $this->telegram->sendMessage($chatId, $help, $this->buildMainMenuKeyboard());
+                if ($this->auth->isAdmin($from['id'])) {
+                    $help = implode("\n", [
+                        '🛠️ <b>管理员指令大全</b>',
+                        '',
+                        '/new 申请证书（进入选择类型流程）',
+                        '/domain example.com 快速申请根域名证书',
+                        '/verify example.com DNS 解析完成后验证并签发',
+                        '/status example.com 查看订单状态',
+                    ]);
+                    $this->telegram->answerCallbackQuery($callbackId, '帮助已发送');
+                    $this->telegram->sendMessage($chatId, $help, $this->buildMainMenuKeyboard());
+                } else {
+                    $this->telegram->answerCallbackQuery($callbackId, '请使用按钮菜单');
+                    $this->telegram->sendMessage($chatId, '✅ 请使用下方按钮菜单进行操作。', $this->buildMainMenuKeyboard());
+                }
                 return;
             }
         }
@@ -333,5 +360,20 @@ class Bot
         }
 
         $user->save(['pending_action' => '', 'pending_order_id' => 0]);
+    }
+
+    private function getUserIdByTgId(array $from): ?int
+    {
+        if (!isset($from['id'])) {
+            return null;
+        }
+
+        $this->auth->startUser($from);
+        $user = TgUser::where('tg_id', $from['id'])->find();
+        if (!$user) {
+            return null;
+        }
+
+        return (int) $user['id'];
     }
 }
