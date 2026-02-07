@@ -1127,11 +1127,17 @@ class CertService
     {
         $recordName = $this->normalizeTxtHost($domain, $host);
         $valueCount = count($values);
-        $message = "\n<b>记录名（主机记录）</b>\n<pre>_acme-challenge</pre>\n";
-        $message .= "<b>记录类型</b>\n<pre>TXT</pre>\n";
-        $message .= "<b>记录值</b>\n<pre>" . implode("\n", $values) . "</pre>\n";
+        $message = '';
+        foreach ($values as $index => $value) {
+            $lineNo = $index + 1;
+            $message .= "\n<b>第 {$lineNo} 条记录</b>\n";
+            $message .= "<b>记录名（主机记录）</b>\n<pre>_acme-challenge</pre>\n";
+            $message .= "<b>记录类型</b>\n<pre>TXT</pre>\n";
+            $message .= "<b>记录值</b>\n<pre>{$value}</pre>\n";
+        }
         if ($valueCount > 1) {
-            $message .= "⚠️ 当前需要添加 <b>{$valueCount}</b> 条 TXT 记录值，请全部添加后再验证。\n";
+            $message .= "⚠️ 当前需要添加 <b>{$valueCount}</b> 条 TXT 记录，请全部添加后再验证。\n";
+            $message .= "✅ DNS 允许同一个主机记录（_acme-challenge）存在多条 TXT 记录值，请放心添加。\n";
         }
         $message .= "\n说明：主机记录只填 <b>_acme-challenge</b>，系统会自动拼接主域名 {$domain}（完整记录为 {$recordName}）。";
         return $message;
