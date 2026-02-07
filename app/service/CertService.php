@@ -85,6 +85,25 @@ class CertService
         return $order ? $order->toArray() : null;
     }
 
+    public function findLatestPendingDomainOrder(int $userId): ?array
+    {
+        $order = CertOrder::where('tg_user_id', $userId)
+            ->where('status', 'created')
+            ->where('domain', '')
+            ->where('cert_type', '<>', '')
+            ->order('id', 'desc')
+            ->find();
+        return $order ? $order->toArray() : null;
+    }
+
+    public function findLatestOrder(int $userId): ?array
+    {
+        $order = CertOrder::where('tg_user_id', $userId)
+            ->order('id', 'desc')
+            ->find();
+        return $order ? $order->toArray() : null;
+    }
+
     public function startOrder(array $from): array
     {
         $user = TgUser::where('tg_id', $from['id'])->find();
@@ -241,6 +260,41 @@ class CertService
             $message .= "\n有效期至：{$info['expires_at']}";
         }
 
+        return ['success' => true, 'message' => $message];
+    }
+
+    public function reinstallCert(int $userId, int $orderId): array
+    {
+        $order = CertOrder::where('id', $orderId)
+            ->where('tg_user_id', $userId)
+            ->find();
+        if (!$order) {
+            return ['success' => false, 'message' => '❌ 订单不存在。'];
+        }
+
+        if ($order['status'] !== 'issued') {
+            return ['success' => false, 'message' => '⚠️ 证书尚未签发，无法重新导出。'];
+        }
+
+        $this->logDebug('acme_reinstall_start', ['domain' => $order['domain'], 'order_id' => $order['id']]);
+        try {
+            $install = $this->acme->installCert($order['domain']);
+        } catch (\Throwable $e) {
+            $this->logDebug('acme_reinstall_exception', ['error' => $e->getMessage()]);
+            $order->save(['last_error' => $e->getMessage()]);
+            $this->log($userId, 'acme_reinstall_error', $e->getMessage());
+            return ['success' => false, 'message' => '❌ 重新导出失败：' . $e->getMessage()];
+        }
+        $this->logDebug('acme_reinstall_end', ['success' => $install['success'] ?? false]);
+        $this->log($userId, 'acme_reinstall', $this->summarizeOutput($install['output']));
+        if (!$install['success']) {
+            $order->save(['last_error' => $install['output']]);
+            return ['success' => false, 'message' => '❌ 重新导出失败：' . $install['output']];
+        }
+
+        $order->save(['last_error' => '']);
+        $message = "✅ 已重新导出证书文件。\n";
+        $message .= $this->buildDownloadFilesMessage($order);
         return ['success' => true, 'message' => $message];
     }
 
@@ -405,7 +459,10 @@ class CertService
         $this->logDebug('acme_issue_dry_run_end', [
             'success' => $dryRun['success'] ?? false,
         ]);
-        $this->log($user['id'], 'acme_issue_dry_run', $dryRun['output']);
+        $this->logDebug('acme_issue_dry_run_output', [
+            'snippet' => $this->summarizeOutput($dryRun['output']),
+        ]);
+        $this->log($user['id'], 'acme_issue_dry_run', $this->summarizeOutput($dryRun['output']));
         if (!$dryRun['success']) {
             $order->save([
                 'status' => 'created',
@@ -521,7 +578,8 @@ class CertService
             ];
         }
         $this->logDebug('acme_renew_end', ['success' => $renew['success'] ?? false]);
-        $this->log($userId, 'acme_renew', $renew['output']);
+        $this->logDebug('acme_renew_output', ['snippet' => $this->summarizeOutput($renew['output'])]);
+        $this->log($userId, 'acme_renew', $this->summarizeOutput($renew['output']));
         if (!$renew['success']) {
             $order->save(['status' => 'dns_verified', 'last_error' => $renew['output']]);
             return [
@@ -542,7 +600,8 @@ class CertService
             ];
         }
         $this->logDebug('acme_install_end', ['success' => $install['success'] ?? false]);
-        $this->log($userId, 'acme_install_cert', $install['output']);
+        $this->logDebug('acme_install_output', ['snippet' => $this->summarizeOutput($install['output'])]);
+        $this->log($userId, 'acme_install_cert', $this->summarizeOutput($install['output']));
         if (!$install['success']) {
             $order->save(['status' => 'dns_verified', 'last_error' => $install['output']]);
             return [
@@ -596,6 +655,17 @@ class CertService
         }
 
         return ['success' => true, 'message' => $message, 'order' => $order];
+    }
+
+    public function recordOrderError(int $userId, int $orderId, string $message): void
+    {
+        $order = CertOrder::where('id', $orderId)
+            ->where('tg_user_id', $userId)
+            ->find();
+        if ($order) {
+            $order->save(['last_error' => $message]);
+        }
+        $this->log($userId, 'order_error', $message);
     }
 
     public function statusByDomain(string $domain): array
@@ -743,6 +813,9 @@ class CertService
         } elseif ($status === 'created' && $order['domain'] !== '') {
             $message .= "\n\n⚠️ 订单未完成，下一步请生成 DNS TXT 记录。\n";
             $message .= "提示：根域名证书仅保护 example.com；通配符证书保护 *.example.com，但这里依然只填写主域名。";
+            if ($this->isOrderStale($order)) {
+                $message .= "\n⚠️ 该订单已长时间未推进，建议取消后重新申请。";
+            }
         } elseif ($status === 'issued') {
             $issuedAt = $order['updated_at'] ?? '';
             $message .= "\n\n🎉 <b>状态：issued</b>\n";
@@ -795,6 +868,9 @@ class CertService
                     ['text' => '🚀 立即签发', 'callback_data' => "verify:{$order['id']}"],
                 ],
                 [
+                    ['text' => '❌ 取消订单', 'callback_data' => "cancel:{$order['id']}"],
+                ],
+                [
                     ['text' => '返回订单列表', 'callback_data' => 'menu:orders'],
                 ],
             ];
@@ -814,7 +890,10 @@ class CertService
                 ],
                 [
                     ['text' => '查看证书信息', 'callback_data' => "info:{$order['id']}"],
-                    ['text' => '查看文件路径/重新导出', 'callback_data' => "download:{$order['id']}"],
+                    ['text' => '查看文件路径', 'callback_data' => "download:{$order['id']}"],
+                ],
+                [
+                    ['text' => '重新导出', 'callback_data' => "reinstall:{$order['id']}"],
                 ],
                 [
                     ['text' => '返回订单列表', 'callback_data' => 'menu:orders'],
@@ -890,6 +969,9 @@ class CertService
             }
         }
         $buttons[] = [
+            ['text' => '重新申请证书', 'callback_data' => 'menu:new'],
+        ];
+        $buttons[] = [
             ['text' => '取消订单', 'callback_data' => "cancel:{$order['id']}"],
         ];
 
@@ -909,6 +991,18 @@ class CertService
         }
 
         return "{$normalizedHost}.{$domain}";
+    }
+
+    private function isOrderStale(CertOrder $order, int $minutes = 30): bool
+    {
+        if (empty($order['updated_at'])) {
+            return false;
+        }
+        $updated = strtotime($order['updated_at']);
+        if (!$updated) {
+            return false;
+        }
+        return $updated < (time() - $minutes * 60);
     }
 
     private function getTxtValues(CertOrder $order): array
@@ -992,5 +1086,14 @@ class CertService
             @mkdir($logDir, 0755, true);
         }
         return $logDir . DIRECTORY_SEPARATOR . 'tg_bot.log';
+    }
+
+    private function summarizeOutput(string $output, int $limit = 500): string
+    {
+        $clean = trim(preg_replace('/\s+/', ' ', $output));
+        if (strlen($clean) <= $limit) {
+            return $clean;
+        }
+        return substr($clean, 0, $limit) . '...';
     }
 }
