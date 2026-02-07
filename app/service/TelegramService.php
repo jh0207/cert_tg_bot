@@ -14,13 +14,14 @@ class TelegramService
         $this->apiBase = rtrim($config['api_base'], '/');
     }
 
-    public function sendMessage(int $chatId, string $text, ?array $inlineKeyboard = null): void
+    public function sendMessage(int $chatId, string $text, ?array $inlineKeyboard = null, bool $disablePreview = true): void
     {
         $url = $this->apiBase . '/bot' . $this->token . '/sendMessage';
         $payload = [
             'chat_id' => $chatId,
             'text' => $text,
             'parse_mode' => 'HTML',
+            'disable_web_page_preview' => $disablePreview,
         ];
         if ($inlineKeyboard) {
             $payload['reply_markup'] = json_encode(['inline_keyboard' => $inlineKeyboard], JSON_UNESCAPED_UNICODE);
