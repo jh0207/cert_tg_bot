@@ -25,6 +25,10 @@ class CertService
         if (!$validator->check(['domain' => $domain])) {
             return ['success' => false, 'message' => '❌ 域名格式错误，请检查后重试。'];
         }
+        $typeError = $this->validateDomainByType($domain, 'root');
+        if ($typeError) {
+            return ['success' => false, 'message' => $typeError];
+        }
 
         $user = TgUser::where('tg_id', $from['id'])->find();
         if (!$user) {
@@ -139,6 +143,7 @@ class CertService
         }
 
         if (!$user['pending_order_id']) {
+            $user->save(['pending_action' => '', 'pending_order_id' => 0]);
             return ['success' => false, 'message' => '⚠️ 没有待处理的订单，请先申请证书。'];
         }
 
@@ -146,15 +151,23 @@ class CertService
             ->where('tg_user_id', $userId)
             ->find();
         if (!$order) {
+            $user->save(['pending_action' => '', 'pending_order_id' => 0]);
             return ['success' => false, 'message' => '❌ 订单不存在。'];
         }
 
         if ($order['status'] !== 'created') {
+            $user->save(['pending_action' => '', 'pending_order_id' => 0]);
             return ['success' => false, 'message' => '⚠️ 当前订单状态不可提交域名。'];
         }
 
         if ($order['domain'] !== '') {
+            $user->save(['pending_action' => '', 'pending_order_id' => 0]);
             return ['success' => false, 'message' => '⚠️ 该订单已提交域名。'];
+        }
+
+        $typeError = $this->validateDomainByType($domain, $order['cert_type']);
+        if ($typeError) {
+            return ['success' => false, 'message' => $typeError];
         }
 
         $duplicate = CertOrder::where('domain', $domain)
@@ -225,7 +238,7 @@ class CertService
         }
 
         $message = "✅ 证书已导出至服务器目录：\n{$this->getOrderExportPath($order)}\n\n";
-        $message .= "文件列表：\ncert.pem\nfullchain.pem\nprivkey.pem";
+        $message .= $this->buildDownloadFilesMessage($order);
         return ['success' => true, 'message' => $message];
     }
 
@@ -249,19 +262,16 @@ class CertService
         }
 
         $txt = $this->dns->parseTxtRecord($dryRun['output']);
-        $order->save([
-            'status' => 'dns_wait',
+        $this->updateOrderStatus($user['id'], $order, 'dns_wait', [
             'txt_host' => $txt['name'] ?? '',
             'txt_value' => $txt['value'] ?? '',
             'acme_output' => $dryRun['output'],
         ]);
 
-        $message = "🧾 <b>请添加 TXT 记录</b> 后点击「我已完成解析」按钮进行验证。\n";
+        $message = "🧾 <b>状态：dns_wait（等待 DNS TXT 解析）</b>\n";
+        $message .= "请先添加下面的 TXT 记录，然后点击「我已完成解析（验证）」：\n";
         if ($txt) {
-            $message .= "<pre>";
-            $message .= "域名 | 主机记录 | 类型 | 记录值\n";
-            $message .= "{$domain} | {$txt['name']} | TXT | {$txt['value']}";
-            $message .= "</pre>";
+            $message .= $this->formatTxtRecordBlock($domain, $txt['name'], $txt['value']);
         } else {
             $message .= "⚠️ 无法解析 TXT 记录，请查看输出：\n" . $dryRun['output'];
         }
@@ -292,20 +302,22 @@ class CertService
     private function verifyOrderByOrder(CertOrder $order): array
     {
         $userId = $order['tg_user_id'];
-        if ($order['status'] !== 'dns_wait') {
-            return ['success' => false, 'message' => '⚠️ 当前状态不可验证。'];
+        if (!in_array($order['status'], ['dns_wait', 'dns_verified'], true)) {
+            return ['success' => false, 'message' => '⚠️ 当前状态不可验证，请先完成 DNS 解析。'];
         }
 
-        if ($order['txt_host'] && $order['txt_value']) {
-            if (!$this->dns->verifyTxt($order['txt_host'], $order['txt_value'])) {
-                return [
-                    'success' => false,
-                    'message' => '⏳ 当前未检测到 TXT 记录，DNS 可能仍在生效中。通常需要 1~10 分钟，部分 DNS 更久。',
-                ];
+        if ($order['status'] === 'dns_wait') {
+            if ($order['txt_host'] && $order['txt_value']) {
+                if (!$this->dns->verifyTxt($order['txt_host'], $order['txt_value'])) {
+                    return [
+                        'success' => false,
+                        'message' => '⏳ 当前未检测到 TXT 记录，DNS 可能仍在生效中。通常需要 1~10 分钟，部分 DNS 更久。',
+                    ];
+                }
             }
-        }
 
-        $order->save(['status' => 'dns_verified']);
+            $this->updateOrderStatus($userId, $order, 'dns_verified');
+        }
 
         $domains = $this->getAcmeDomains($order);
         $renew = $this->acme->renew($domains);
@@ -322,8 +334,7 @@ class CertService
 
         $exportPath = $this->getOrderExportPath($order);
 
-        $order->save([
-            'status' => 'issued',
+        $this->updateOrderStatus($userId, $order, 'issued', [
             'cert_path' => $exportPath . 'cert.pem',
             'key_path' => $exportPath . 'privkey.pem',
             'fullchain_path' => $exportPath . 'fullchain.pem',
@@ -333,7 +344,9 @@ class CertService
 
         $info = $this->readCertificateInfo($exportPath . 'cert.pem');
         $typeText = $this->formatCertType($order['cert_type']);
-        $message = "🎉 证书签发成功（{$typeText}），已导出到：{$exportPath}";
+        $message = "🎉 <b>状态：issued（签发成功）</b>\n证书类型：{$typeText}\n";
+        $message .= "已导出到：{$exportPath}\n";
+        $message .= $this->buildDownloadFilesMessage($order);
         if ($info['expires_at']) {
             $message .= "\n有效期至：{$info['expires_at']}";
         }
@@ -356,7 +369,11 @@ class CertService
             return ['success' => false, 'message' => '❌ 订单不存在。'];
         }
 
-        return ['success' => true, 'message' => $this->buildOrderStatusMessage($order, false)];
+        return [
+            'success' => true,
+            'message' => $this->buildOrderStatusMessage($order, false),
+            'order' => $order,
+        ];
     }
 
     public function statusByDomain(string $domain): array
@@ -383,12 +400,22 @@ class CertService
             return ['success' => true, 'message' => '📂 暂无证书订单记录。'];
         }
 
-        $lines = ["📂 <b>证书订单记录</b>"];
+        $messages = [
+            [
+                'text' => "📂 <b>证书订单记录</b>\n点击订单按钮查看/操作。",
+                'keyboard' => null,
+            ],
+        ];
+
         foreach ($orders as $order) {
-            $lines = array_merge($lines, $this->formatOrderSummary($order));
+            $messages[] = $this->buildOrderCard($order);
         }
 
-        return ['success' => true, 'message' => implode("\n", $lines)];
+        return [
+            'success' => true,
+            'message' => '订单列表已发送',
+            'messages' => $messages,
+        ];
     }
 
     private function log(int $userId, string $action, string $detail): void
@@ -472,43 +499,148 @@ class CertService
     {
         $status = $order['status'];
         $domain = $order['domain'] !== '' ? $order['domain'] : '（未提交域名）';
-        $message = "📌 当前状态：<b>{$status}</b>\n域名：<b>{$domain}</b>";
+        $typeText = $order['cert_type'] ? $this->formatCertType($order['cert_type']) : '（未选择）';
+        $message = "📌 当前状态：<b>{$status}</b>\n域名：<b>{$domain}</b>\n证书类型：<b>{$typeText}</b>";
 
         if ($status === 'dns_wait') {
-            $message .= "\n\n🧾 <b>请添加 TXT 记录</b> 后点击「我已完成解析」按钮进行验证。\n";
+            $message .= "\n\n🧾 <b>状态：dns_wait</b>\n请添加 TXT 记录后点击「我已完成解析（验证）」。\n";
             if ($order['txt_host'] && $order['txt_value']) {
-                $message .= "<pre>";
-                $message .= "域名 | 主机记录 | 类型 | 记录值\n";
-                $message .= "{$order['domain']} | {$order['txt_host']} | TXT | {$order['txt_value']}";
-                $message .= "</pre>";
+                $message .= $this->formatTxtRecordBlock($order['domain'], $order['txt_host'], $order['txt_value']);
             }
-        } elseif ($status === 'created' && $order['domain'] === '' && $withTips) {
-            $message .= "\n\n📝 请先提交主域名，例如 <b>example.com</b>。";
-        } elseif ($status === 'created' && $order['domain'] !== '' && $withTips) {
-            $message .= "\n\n⏳ 订单已创建，正在等待生成解析记录，请稍后点击“查询状态”获取 TXT 记录。";
+        } elseif ($status === 'dns_verified') {
+            $message .= "\n\n✅ <b>状态：dns_verified</b>\nDNS 已验证，点击「我已完成解析（验证）」继续签发证书。";
+        } elseif ($status === 'created' && $order['domain'] === '') {
+            $message .= "\n\n📝 等待选择证书类型 / 提交主域名。";
+        } elseif ($status === 'created' && $order['domain'] !== '') {
+            if ($withTips) {
+                $message .= "\n\n⏳ 订单已创建，等待生成解析记录，请稍后点击“查询状态”获取 TXT 记录。";
+            }
         } elseif ($status === 'issued') {
-            $message .= "\n\n✅ 证书已签发，可点击“下载证书”获取文件。";
+            $issuedAt = $order['updated_at'] ?? '';
+            $message .= "\n\n🎉 <b>状态：issued</b>\n";
+            if ($issuedAt) {
+                $message .= "签发时间：{$issuedAt}\n";
+            }
+            $message .= $this->buildDownloadFilesMessage($order);
         }
 
         return $message;
     }
 
-    private function formatOrderSummary(CertOrder $order): array
+    private function buildOrderCard(CertOrder $order): array
     {
         $status = $order['status'];
-        $domainText = $order['domain'] !== '' ? $order['domain'] : '（未提交域名）';
-        $lines = ["• {$domainText} | <b>{$status}</b>"];
+        $domain = $order['domain'] !== '' ? $order['domain'] : '（未提交域名）';
+        $typeText = $order['cert_type'] ? $this->formatCertType($order['cert_type']) : '（未选择）';
+        $message = "🔖 订单 #{$order['id']}\n域名：<b>{$domain}</b>\n证书类型：<b>{$typeText}</b>\n状态：<b>{$status}</b>";
+        $keyboard = null;
 
-        if ($status === 'dns_wait' && $order['txt_host'] && $order['txt_value']) {
-            $lines[] = "  TXT：{$order['txt_host']} = {$order['txt_value']}";
+        if ($status === 'created') {
+            $message .= "\n📝 等待选择证书类型 / 提交主域名。";
+        } elseif ($status === 'dns_wait') {
+            $message .= "\n🧾 请添加 TXT 记录后点击验证：\n";
+            if ($order['txt_host'] && $order['txt_value']) {
+                $message .= $this->formatTxtRecordBlock($order['domain'], $order['txt_host'], $order['txt_value']);
+            }
+            $keyboard = [
+                [
+                    ['text' => '我已完成解析（验证）', 'callback_data' => "verify:{$order['id']}"],
+                ],
+                [
+                    ['text' => '返回订单列表', 'callback_data' => 'menu:orders'],
+                ],
+            ];
+        } elseif ($status === 'dns_verified') {
+            $message .= "\n✅ DNS 已验证，点击下方按钮继续签发证书。";
+            $keyboard = [
+                [
+                    ['text' => '我已完成解析（验证）', 'callback_data' => "verify:{$order['id']}"],
+                ],
+                [
+                    ['text' => '返回订单列表', 'callback_data' => 'menu:orders'],
+                ],
+            ];
         } elseif ($status === 'issued') {
-            $lines[] = '  ✅ 证书已签发，导出路径：' . $this->getOrderExportPath($order);
-        } elseif ($status === 'created' && $order['domain'] === '') {
-            $lines[] = '  📝 等待提交主域名。';
-        } elseif ($status === 'created') {
-            $lines[] = '  ⏳ 订单已创建，请稍后查询状态获取解析记录。';
+            $issuedAt = $order['updated_at'] ?? '';
+            $message .= "\n🎉 已签发完成";
+            if ($issuedAt) {
+                $message .= "\n签发时间：{$issuedAt}";
+            }
+            $message .= "\n" . $this->buildDownloadFilesMessage($order);
+            $keyboard = [
+                [
+                    ['text' => '查看证书', 'callback_data' => "info:{$order['id']}"],
+                    ['text' => '下载证书', 'callback_data' => "download:{$order['id']}"],
+                ],
+                [
+                    ['text' => '返回订单列表', 'callback_data' => 'menu:orders'],
+                ],
+            ];
         }
 
-        return $lines;
+        return [
+            'text' => $message,
+            'keyboard' => $keyboard,
+        ];
+    }
+
+    private function formatTxtRecordBlock(string $domain, string $host, string $value): string
+    {
+        $lines = [
+            "Host (主机记录): {$host}",
+            'Type (类型): TXT',
+            "Value (记录值): {$value}",
+        ];
+        $message = "<pre>" . implode("\n", $lines) . "</pre>";
+        $message .= "\n说明：请在 DNS 中添加 <b>{$domain}</b> 的 TXT 记录，主机记录通常是 <b>{$host}</b>。";
+        return $message;
+    }
+
+    private function buildDownloadFilesMessage(CertOrder $order): string
+    {
+        $exportPath = $this->getOrderExportPath($order);
+        $lines = [
+            '下载文件：',
+            "fullchain.cer -> {$exportPath}fullchain.pem",
+            "cert.cer -> {$exportPath}cert.pem",
+            "key -> {$exportPath}privkey.pem",
+        ];
+        return "<pre>" . implode("\n", $lines) . "</pre>";
+    }
+
+    private function validateDomainByType(string $domain, ?string $certType): ?string
+    {
+        if (strpos($domain, '*') !== false) {
+            return '❌ 请不要输入通配符格式（*.example.com），只需要输入主域名，例如 <b>example.com</b>。';
+        }
+
+        if (!$certType) {
+            return null;
+        }
+
+        $labels = explode('.', $domain);
+        if (count($labels) > 2) {
+            if ($certType === 'wildcard') {
+                return '⚠️ 通配符证书请输入主域名（根域名），例如 <b>example.com</b>，不要输入子域名。';
+            }
+
+            return '⚠️ 根域名证书请输入主域名（根域名），例如 <b>example.com</b>，不要输入子域名。';
+        }
+
+        return null;
+    }
+
+    private function updateOrderStatus(int $userId, CertOrder $order, string $status, array $extra = []): void
+    {
+        $fromStatus = $order['status'];
+        $payload = array_merge(['status' => $status], $extra);
+        $order->save($payload);
+        $this->logStatusTransition($userId, $order['domain'], $fromStatus, $status);
+    }
+
+    private function logStatusTransition(int $userId, string $domain, string $from, string $to): void
+    {
+        $detail = "{$domain} {$from} -> {$to}";
+        $this->log($userId, 'order_status_change', $detail);
     }
 }
