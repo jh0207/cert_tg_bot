@@ -67,13 +67,6 @@ class Bot
             return;
         }
 
-        if ($user['pending_action'] === 'await_status_domain' && strpos($text, '/') !== 0) {
-            $result = $this->certService->status($message['from'], $text);
-            $this->clearPendingAction($user['id']);
-            $this->telegram->sendMessage($chatId, $result['message']);
-            return;
-        }
-
         if (strpos($text, '/start') === 0) {
             $role = $user['role'];
             $messageText = "👋 <b>欢迎使用证书机器人</b>\n";
@@ -186,10 +179,11 @@ class Bot
             }
 
             $current = (int) $target['apply_quota'];
-            $target->save(['apply_quota' => $current + $amount]);
+            $newQuota = $current + $amount;
+            $target->save(['apply_quota' => $newQuota]);
             $this->telegram->sendMessage(
                 $chatId,
-                "✅ 已为用户 <b>{$targetId}</b> 增加 <b>{$amount}</b> 次申请额度（当前剩余 {$current + $amount} 次）。"
+                "✅ 已为用户 <b>{$targetId}</b> 增加 <b>{$amount}</b> 次申请额度（当前剩余 {$newQuota} 次）。"
             );
             return;
         }
