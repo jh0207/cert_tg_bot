@@ -7,6 +7,7 @@ class AcmeService
     private string $acmePath;
     private string $exportPath;
     private string $acmeServer;
+    private string $logFile;
 
     public function __construct()
     {
@@ -14,6 +15,7 @@ class AcmeService
         $this->acmePath = $config['acme_path'];
         $this->exportPath = rtrim($config['cert_export_path'], '/') . '/';
         $this->acmeServer = $config['acme_server'] ?? 'letsencrypt';
+        $this->logFile = $this->resolveLogFile();
     }
 
     public function issueDryRun($domains): array
@@ -92,6 +94,7 @@ class AcmeService
     {
         $safeArgs = array_map('escapeshellarg', $args);
         $command = implode(' ', $safeArgs);
+        $this->logAcme('acme_command_start', ['command' => $command]);
 
         $descriptor = [
             1 => ['pipe', 'w'],
@@ -100,6 +103,7 @@ class AcmeService
 
         $process = proc_open($command, $descriptor, $pipes);
         if (!is_resource($process)) {
+            $this->logAcme('acme_command_failed', ['command' => $command, 'error' => 'proc_open failed']);
             return ['success' => false, 'output' => 'Failed to start acme.sh'];
         }
 
@@ -110,12 +114,38 @@ class AcmeService
         }
 
         $exitCode = proc_close($process);
+        $this->logAcme('acme_command_done', [
+            'command' => $command,
+            'exit_code' => $exitCode,
+            'stdout' => trim($stdout),
+            'stderr' => trim($stderr),
+        ]);
         return [
             'success' => $exitCode === 0,
             'output' => trim($stdout . "\n" . $stderr),
             'stdout' => trim($stdout),
             'stderr' => trim($stderr),
         ];
+    }
+
+    private function logAcme(string $message, array $context = []): void
+    {
+        $line = date('Y-m-d H:i:s') . ' ' . $message;
+        if ($context !== []) {
+            $line .= ' ' . json_encode($context, JSON_UNESCAPED_UNICODE);
+        }
+        $line .= PHP_EOL;
+        @file_put_contents($this->logFile, $line, FILE_APPEND | LOCK_EX);
+    }
+
+    private function resolveLogFile(): string
+    {
+        $base = function_exists('root_path') ? root_path() : dirname(__DIR__, 2) . DIRECTORY_SEPARATOR;
+        $logDir = rtrim($base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'log';
+        if (!is_dir($logDir)) {
+            @mkdir($logDir, 0755, true);
+        }
+        return $logDir . DIRECTORY_SEPARATOR . 'acme.log';
     }
 
     private function normalizeDomains($domains): array
