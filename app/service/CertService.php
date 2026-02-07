@@ -69,6 +69,22 @@ class CertService
         return $this->issueOrder($user, $order);
     }
 
+    public function findOrderById(int $userId, int $orderId): ?array
+    {
+        $order = CertOrder::where('id', $orderId)
+            ->where('tg_user_id', $userId)
+            ->find();
+        return $order ? $order->toArray() : null;
+    }
+
+    public function findOrderByDomain(int $userId, string $domain): ?array
+    {
+        $order = CertOrder::where('domain', $domain)
+            ->where('tg_user_id', $userId)
+            ->find();
+        return $order ? $order->toArray() : null;
+    }
+
     public function startOrder(array $from): array
     {
         $user = TgUser::where('tg_id', $from['id'])->find();
@@ -374,7 +390,21 @@ class CertService
 
         $domain = $order['domain'];
         $domains = $this->getAcmeDomains($order);
-        $dryRun = $this->acme->issueDryRun($domains);
+        $this->logDebug('acme_issue_dry_run_start', ['domains' => $domains, 'order_id' => $order['id']]);
+        try {
+            $dryRun = $this->acme->issueDryRun($domains);
+        } catch (\Throwable $e) {
+            $this->logDebug('acme_issue_dry_run_exception', ['error' => $e->getMessage()]);
+            $order->save([
+                'status' => 'created',
+                'acme_output' => $e->getMessage(),
+                'last_error' => $e->getMessage(),
+            ]);
+            return ['success' => false, 'message' => '❌ 生成 DNS 记录失败：' . $e->getMessage()];
+        }
+        $this->logDebug('acme_issue_dry_run_end', [
+            'success' => $dryRun['success'] ?? false,
+        ]);
         $this->log($user['id'], 'acme_issue_dry_run', $dryRun['output']);
         if (!$dryRun['success']) {
             $order->save([
@@ -454,16 +484,23 @@ class CertService
                 ];
             }
 
+            $this->logDebug('dns_verify_start', [
+                'order_id' => $order['id'],
+                'host' => $order['txt_host'],
+                'values' => $txtValues,
+            ]);
             if (!$this->dns->verifyTxt($order['txt_host'], $txtValues)) {
                 $order->save([
                     'status' => 'dns_wait',
                     'last_error' => 'DNS TXT 记录未全部生效，请稍后重试。',
                 ]);
+                $this->logDebug('dns_verify_failed', ['order_id' => $order['id']]);
                 return [
                     'success' => false,
                     'message' => '⏳ 当前未检测到全部 TXT 记录，DNS 可能仍在生效中。通常需要 1~10 分钟，部分 DNS 更久。',
                 ];
             }
+            $this->logDebug('dns_verify_success', ['order_id' => $order['id']]);
 
             $this->updateOrderStatus($userId, $order, 'dns_verified', ['last_error' => '']);
             $message = "✅ <b>状态：dns_verified（DNS 已验证）</b>\n";
@@ -472,7 +509,18 @@ class CertService
         }
 
         $domains = $this->getAcmeDomains($order);
-        $renew = $this->acme->renew($domains);
+        $this->logDebug('acme_renew_start', ['domains' => $domains, 'order_id' => $order['id']]);
+        try {
+            $renew = $this->acme->renew($domains);
+        } catch (\Throwable $e) {
+            $this->logDebug('acme_renew_exception', ['error' => $e->getMessage()]);
+            $order->save(['status' => 'dns_verified', 'last_error' => $e->getMessage()]);
+            return [
+                'success' => false,
+                'message' => "❌ 证书签发失败：{$e->getMessage()}\n请稍后重试或重新验证。",
+            ];
+        }
+        $this->logDebug('acme_renew_end', ['success' => $renew['success'] ?? false]);
         $this->log($userId, 'acme_renew', $renew['output']);
         if (!$renew['success']) {
             $order->save(['status' => 'dns_verified', 'last_error' => $renew['output']]);
@@ -482,7 +530,18 @@ class CertService
             ];
         }
 
-        $install = $this->acme->installCert($order['domain']);
+        $this->logDebug('acme_install_start', ['domain' => $order['domain'], 'order_id' => $order['id']]);
+        try {
+            $install = $this->acme->installCert($order['domain']);
+        } catch (\Throwable $e) {
+            $this->logDebug('acme_install_exception', ['error' => $e->getMessage()]);
+            $order->save(['status' => 'dns_verified', 'last_error' => $e->getMessage()]);
+            return [
+                'success' => false,
+                'message' => "❌ 证书导出失败：{$e->getMessage()}\n请稍后重试或重新导出。",
+            ];
+        }
+        $this->logDebug('acme_install_end', ['success' => $install['success'] ?? false]);
         $this->log($userId, 'acme_install_cert', $install['output']);
         if (!$install['success']) {
             $order->save(['status' => 'dns_verified', 'last_error' => $install['output']]);
@@ -912,5 +971,26 @@ class CertService
     {
         $detail = "{$domain} {$from} -> {$to}";
         $this->log($userId, 'order_status_change', $detail);
+    }
+
+    private function logDebug(string $message, array $context = []): void
+    {
+        $logFile = $this->resolveLogFile();
+        $line = date('Y-m-d H:i:s') . ' ' . $message;
+        if ($context !== []) {
+            $line .= ' ' . json_encode($context, JSON_UNESCAPED_UNICODE);
+        }
+        $line .= PHP_EOL;
+        @file_put_contents($logFile, $line, FILE_APPEND | LOCK_EX);
+    }
+
+    private function resolveLogFile(): string
+    {
+        $base = function_exists('root_path') ? root_path() : dirname(__DIR__, 2) . DIRECTORY_SEPARATOR;
+        $logDir = rtrim($base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'log';
+        if (!is_dir($logDir)) {
+            @mkdir($logDir, 0755, true);
+        }
+        return $logDir . DIRECTORY_SEPARATOR . 'tg_bot.log';
     }
 }

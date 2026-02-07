@@ -24,6 +24,9 @@ class Bot
 
     public function handleUpdate(array $update): void
     {
+        $this->logDebug('update_received', [
+            'type' => isset($update['callback_query']) ? 'callback' : (isset($update['message']) ? 'message' : 'other'),
+        ]);
         if (isset($update['callback_query'])) {
             $this->handleCallback($update['callback_query']);
             return;
@@ -131,6 +134,7 @@ class Bot
                 return;
             }
 
+            $this->sendProcessingMessage($chatId, '⏳ 正在生成 DNS 验证记录，请稍候…');
             $result = $this->certService->createOrder($message['from'], $domainInput);
             $keyboard = $this->resolveOrderKeyboard($result);
             $this->telegram->sendMessage($chatId, $result['message'], $keyboard);
@@ -143,6 +147,7 @@ class Bot
                 $this->telegram->sendMessage($chatId, '⚠️ 请输入要验证的域名，例如 <b>example.com</b>。');
                 return;
             }
+            $this->sendVerifyProcessingMessageByDomain($chatId, $user['id'], $domain);
             $result = $this->certService->verifyOrder($message['from'], $domain);
             if (($result['success'] ?? false) && isset($result['order'])) {
                 $keyboard = $this->resolveOrderKeyboard($result);
@@ -211,12 +216,14 @@ class Bot
         $chatId = $callback['message']['chat']['id'] ?? null;
         $callbackId = $callback['id'] ?? '';
 
+        $callbackState = ['answered' => false];
+        $this->answerCallbackOnce($callbackId, '✅ 已收到，正在处理…', $callbackState);
+
         if (!$chatId || $data === '') {
             return;
         }
 
-        $callbackState = ['answered' => false];
-        $this->answerCallbackOnce($callbackId, '✅ 已收到，正在处理…', $callbackState);
+        $this->logDebug('callback_received', ['data' => $data]);
 
         $parts = explode(':', $data);
         $action = $parts[0] ?? '';
@@ -247,6 +254,7 @@ class Bot
                 $this->telegram->sendMessage($chatId, '❌ 用户不存在，请先发送 /start');
                 return;
             }
+            $this->sendVerifyProcessingMessageById($chatId, $userId, $orderId);
             $result = $this->certService->verifyOrderById($userId, $orderId);
             if (($result['success'] ?? false) && isset($result['order'])) {
                 $keyboard = $this->resolveOrderKeyboard($result);
@@ -324,6 +332,7 @@ class Bot
             }
 
             if ($subAction === 'retry') {
+                $this->sendProcessingMessage($chatId, '⏳ 正在生成 DNS 验证记录，请稍候…');
                 $result = $this->certService->retryDnsChallenge($userId, $orderId);
                 $keyboard = $this->resolveOrderKeyboard($result);
                 $this->telegram->sendMessage($chatId, $result['message'], $keyboard);
@@ -422,6 +431,8 @@ class Bot
                 return;
             }
         }
+
+        $this->telegram->sendMessage($chatId, '⚠️ 未识别的操作，请返回菜单重试。', $this->buildMainMenuKeyboard());
     }
 
     private function buildTypeKeyboard(int $orderId): array
@@ -599,6 +610,12 @@ class Bot
             return false;
         }
 
+        $this->logDebug('pending_action_hit', [
+            'user_id' => $user['id'],
+            'action' => $user['pending_action'],
+            'text' => $text,
+        ]);
+
         if ($user['pending_action'] === 'await_domain') {
             $domainInput = $this->extractCommandArgument($text, '/domain');
             if ($domainInput === null && strpos($text, '/') === 0) {
@@ -607,6 +624,7 @@ class Bot
             }
 
             $domain = $domainInput ?? $text;
+            $this->sendProcessingMessage($chatId, '⏳ 正在生成 DNS 验证记录，请稍候…');
             $result = $this->certService->submitDomain($user['id'], $domain);
             $keyboard = $this->resolveOrderKeyboard($result);
             $this->telegram->sendMessage($chatId, $result['message'], $keyboard);
@@ -658,5 +676,51 @@ class Bot
 
         $this->telegram->answerCallbackQuery($callbackId, $message);
         $state['answered'] = true;
+    }
+
+    private function sendProcessingMessage(int $chatId, string $message): void
+    {
+        $this->telegram->sendMessage($chatId, $message);
+    }
+
+    private function sendVerifyProcessingMessageById(int $chatId, int $userId, int $orderId): void
+    {
+        $order = $this->certService->findOrderById($userId, $orderId);
+        if ($order && $order['status'] === 'dns_verified') {
+            $this->sendProcessingMessage($chatId, '⏳ 正在签发证书，请稍候…');
+            return;
+        }
+        $this->sendProcessingMessage($chatId, '⏳ 正在验证 DNS 解析，这可能需要几十秒…');
+    }
+
+    private function sendVerifyProcessingMessageByDomain(int $chatId, int $userId, string $domain): void
+    {
+        $order = $this->certService->findOrderByDomain($userId, $domain);
+        if ($order && $order['status'] === 'dns_verified') {
+            $this->sendProcessingMessage($chatId, '⏳ 正在签发证书，请稍候…');
+            return;
+        }
+        $this->sendProcessingMessage($chatId, '⏳ 正在验证 DNS 解析，这可能需要几十秒…');
+    }
+
+    private function logDebug(string $message, array $context = []): void
+    {
+        $logFile = $this->resolveLogFile();
+        $line = date('Y-m-d H:i:s') . ' ' . $message;
+        if ($context !== []) {
+            $line .= ' ' . json_encode($context, JSON_UNESCAPED_UNICODE);
+        }
+        $line .= PHP_EOL;
+        @file_put_contents($logFile, $line, FILE_APPEND | LOCK_EX);
+    }
+
+    private function resolveLogFile(): string
+    {
+        $base = function_exists('root_path') ? root_path() : dirname(__DIR__, 2) . DIRECTORY_SEPARATOR;
+        $logDir = rtrim($base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'log';
+        if (!is_dir($logDir)) {
+            @mkdir($logDir, 0755, true);
+        }
+        return $logDir . DIRECTORY_SEPARATOR . 'tg_bot.log';
     }
 }
