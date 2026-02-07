@@ -424,7 +424,7 @@ class CertService
 
     private function issueOrder($user, CertOrder $order): array
     {
-        if ($order['status'] !== 'created') {
+        if (!in_array($order['status'], ['created', 'dns_wait', 'failed'], true)) {
             return ['success' => false, 'message' => '⚠️ 当前订单状态不可生成 TXT。'];
         }
 
@@ -439,6 +439,9 @@ class CertService
             'need_install' => 0,
             'retry_count' => 0,
             'last_error' => '',
+            'txt_host' => '',
+            'txt_value' => '',
+            'txt_values_json' => '',
         ]);
 
         $this->log($user['id'], 'order_create', $domain);
