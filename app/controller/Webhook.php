@@ -9,25 +9,31 @@ class Webhook
 {
     public function handle(Request $request)
     {
-        $payload = $request->getInput();
-        $data = json_decode($payload, true);
-        $this->logDebug('webhook_received', [
-            'type' => is_array($data) ? (isset($data['callback_query']) ? 'callback' : 'message') : 'invalid',
-            'update_id' => is_array($data) ? ($data['update_id'] ?? null) : null,
-            'payload' => $this->truncatePayload($payload),
-        ]);
+        try {
+            $payload = $request->getInput();
+            $data = json_decode($payload, true);
+            $this->logDebug('webhook_received', [
+                'type' => is_array($data) ? (isset($data['callback_query']) ? 'callback' : 'message') : 'invalid',
+                'update_id' => is_array($data) ? ($data['update_id'] ?? null) : null,
+                'payload' => $this->truncatePayload($payload),
+            ]);
 
-        $this->sendFastResponse();
+            $this->sendFastResponse();
 
-        $bot = new Bot(new TelegramService());
-        if (is_array($data)) {
-            $bot->handleUpdate($data);
-        } else {
-            $this->logDebug('webhook_invalid_payload', ['payload' => $payload]);
-        }
+            $bot = new Bot(new TelegramService());
+            if (is_array($data)) {
+                $bot->handleUpdate($data);
+            } else {
+                $this->logDebug('webhook_invalid_payload', ['payload' => $payload]);
+            }
 
-        if (function_exists('fastcgi_finish_request')) {
-            fastcgi_finish_request();
+            if (function_exists('fastcgi_finish_request')) {
+                fastcgi_finish_request();
+            }
+        } catch (\Throwable $e) {
+            $this->logDebug('webhook_exception', [
+                'error' => $e->getMessage(),
+            ]);
         }
 
         return response('ok');
