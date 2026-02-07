@@ -736,6 +736,10 @@ class Bot
             return $this->buildFailedKeyboard($order['id']);
         }
 
+        if ($status === 'failed') {
+            return $this->buildFailedKeyboard($result['order']['id']);
+        }
+
         return null;
     }
 
