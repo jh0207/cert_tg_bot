@@ -74,6 +74,7 @@ class AcmeService
 
     public function installCert(string $domain): array
     {
+        $this->ensureExportDir($domain);
         $keyFile = $this->exportPath . $domain . '/key.key';
         $fullchainFile = $this->exportPath . $domain . '/fullchain.cer';
         $certFile = $this->exportPath . $domain . '/cert.cer';
@@ -185,5 +186,13 @@ class AcmeService
         }
 
         return [$domains];
+    }
+
+    private function ensureExportDir(string $domain): void
+    {
+        $dir = $this->exportPath . $domain;
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0755, true);
+        }
     }
 }
