@@ -463,14 +463,6 @@ class CertService
             'snippet' => $this->summarizeOutput($dryRun['output']),
         ]);
         $this->log($user['id'], 'acme_issue_dry_run', $this->summarizeOutput($dryRun['output']));
-        if (!$dryRun['success']) {
-            $order->save([
-                'status' => 'created',
-                'acme_output' => $dryRun['output'],
-                'last_error' => $dryRun['output'],
-            ]);
-            return ['success' => false, 'message' => '❌ acme.sh dry-run 失败：' . $dryRun['output']];
-        }
 
         $txt = $this->dns->parseTxtRecords($dryRun['output']);
         if (!$txt) {
@@ -495,7 +487,7 @@ class CertService
         ]);
 
         $message = "🧾 <b>状态：dns_wait（等待 DNS TXT 解析）</b>\n";
-        $message .= "请先添加下面的 TXT 记录，然后点击「✅ 我已解析，开始验证」：\n";
+        $message .= "请先添加下面的 TXT 记录（此步骤不会签发证书），然后点击「✅ 我已解析，开始验证」：\n";
         $message .= $this->formatTxtRecordBlock($domain, $txt['host'], $txtValues);
 
         $this->log($user['id'], 'order_create', $domain);

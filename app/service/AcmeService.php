@@ -22,7 +22,7 @@ class AcmeService
             $this->acmePath,
             '--issue',
             '--dns',
-            '--dry-run',
+            '--yes-I-know-dns-manual-mode-enough-go-ahead-please',
         ];
         foreach ($this->normalizeDomains($domains) as $domain) {
             $args[] = '-d';
