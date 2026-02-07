@@ -313,8 +313,12 @@ class Bot
                     $this->telegram->answerCallbackQuery($callbackId, '帮助已发送');
                     $this->telegram->sendMessage($chatId, $help, $this->buildMainMenuKeyboard());
                 } else {
-                    $this->telegram->answerCallbackQuery($callbackId, '请使用按钮菜单');
-                    $this->telegram->sendMessage($chatId, '✅ 请使用下方按钮菜单进行操作。', $this->buildMainMenuKeyboard());
+                    $this->telegram->answerCallbackQuery($callbackId, '已发送使用提示');
+                    $this->telegram->sendMessage(
+                        $chatId,
+                        '✅ 请使用下方按钮菜单进行操作：申请证书 / 查询状态 / 订单记录。',
+                        $this->buildMainMenuKeyboard()
+                    );
                 }
                 return;
             }

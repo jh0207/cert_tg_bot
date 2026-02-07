@@ -385,8 +385,7 @@ class CertService
 
         $lines = ["📂 <b>证书订单记录</b>"];
         foreach ($orders as $order) {
-            $domainText = $order['domain'] !== '' ? $order['domain'] : '（未提交域名）';
-            $lines[] = "• {$domainText} | <b>{$order['status']}</b>";
+            $lines = array_merge($lines, $this->formatOrderSummary($order));
         }
 
         return ['success' => true, 'message' => implode("\n", $lines)];
@@ -442,6 +441,10 @@ class CertService
 
     private function hasQuota(TgUser $user): bool
     {
+        if (in_array($user['role'], ['owner', 'admin'], true)) {
+            return true;
+        }
+
         return (int) $user['apply_quota'] > 0;
     }
 
@@ -457,6 +460,10 @@ class CertService
 
     private function quotaExhaustedMessage(TgUser $user): string
     {
+        if (in_array($user['role'], ['owner', 'admin'], true)) {
+            return '✅ 管理员不受申请次数限制。';
+        }
+
         $quota = (int) $user['apply_quota'];
         return "🚫 <b>申请次数不足</b>（剩余 {$quota} 次）。请联系管理员添加次数。";
     }
@@ -477,8 +484,31 @@ class CertService
             }
         } elseif ($status === 'created' && $order['domain'] === '' && $withTips) {
             $message .= "\n\n📝 请先提交主域名，例如 <b>example.com</b>。";
+        } elseif ($status === 'created' && $order['domain'] !== '' && $withTips) {
+            $message .= "\n\n⏳ 订单已创建，正在等待生成解析记录，请稍后点击“查询状态”获取 TXT 记录。";
+        } elseif ($status === 'issued') {
+            $message .= "\n\n✅ 证书已签发，可点击“下载证书”获取文件。";
         }
 
         return $message;
+    }
+
+    private function formatOrderSummary(CertOrder $order): array
+    {
+        $status = $order['status'];
+        $domainText = $order['domain'] !== '' ? $order['domain'] : '（未提交域名）';
+        $lines = ["• {$domainText} | <b>{$status}</b>"];
+
+        if ($status === 'dns_wait' && $order['txt_host'] && $order['txt_value']) {
+            $lines[] = "  TXT：{$order['txt_host']} = {$order['txt_value']}";
+        } elseif ($status === 'issued') {
+            $lines[] = '  ✅ 证书已签发，导出路径：' . $this->getOrderExportPath($order);
+        } elseif ($status === 'created' && $order['domain'] === '') {
+            $lines[] = '  📝 等待提交主域名。';
+        } elseif ($status === 'created') {
+            $lines[] = '  ⏳ 订单已创建，请稍后查询状态获取解析记录。';
+        }
+
+        return $lines;
     }
 }
